@@ -13,7 +13,7 @@ The switch from direct mode to Telegram MiddleProxy relay mode completed success
 - Several relay sockets reached `ESTABLISHED`; many others remained in `SYN-SENT` while Teleproxy tried available relay nodes.
 - The existing client secret and connection links were preserved.
 
-The Telegram client still reported that the proxy was unavailable before the NAT correction.
+The Telegram client still reports that the proxy server is unavailable.
 
 ## Mismatch found
 
@@ -69,51 +69,53 @@ Confirmed after restart:
 - Private connection-link hash unchanged.
 - Default route remained on `eth0`.
 
-## False rollback identified
+## Corrected live observation
 
-The corrected pair was first applied and then rolled back because an earlier validation script required at least two established MiddleProxy sockets immediately after startup.
+A read-only 120-second probe sampled `ss -H -tanp` four times per second while the Telegram client attempted to connect.
 
-That requirement was invalid. Teleproxy may create relay sockets only when client traffic requires them. The source implementation of background outbound creation returns without creating connections, and a later post-rollback diagnostic confirmed that client activity produces both inbound TCP 443 sessions and established MiddleProxy TCP 8888 sessions.
+Confirmed results:
 
-## Live observation parser bug
+- Maximum inbound established TCP 443 sockets: 60.
+- Inbound established connections were observed for the full 120 seconds.
+- Maximum established MiddleProxy TCP 8888 sockets: 16.
+- Established relay connections were observed for the full 120 seconds.
+- Maximum MiddleProxy sockets in `SYN-SENT`: 114.
+- The first inbound client connection was observed within 0.25 seconds.
+- The first established relay connection was observed within 0.25 seconds.
+- AWG received traffic increased by 2,538,556 bytes.
+- AWG sent traffic increased by 5,985,519 bytes.
+- Multiple Telegram MiddleProxy addresses were simultaneously established through local source `10.76.106.92`.
+- Teleproxy, nginx, AWG, TCP 443, default route, TOML config, systemd service, and private connection file remained unchanged throughout the probe.
 
-The first 120-second live observation after the final NAT correction used commands in this form:
+The complete TCP path is therefore proven:
 
-`ss -H -tanp state established`
+`Telegram client -> Teleproxy TCP 443 -> AWG -> Telegram MiddleProxy TCP 8888`
 
-When an explicit state filter is used, `ss` omits the state column from its output. The script still parsed the output as if the state column were present. Therefore these reported values were invalid:
+The Telegram client still reports `Server unavailable`. The remaining failure is above the TCP layer, inside Teleproxy/Fake-TLS/RPC session handling rather than DNS, routing, firewall, certificate, AWG, or MiddleProxy reachability.
 
-- `Maximum inbound ESTABLISHED sockets`
-- `Maximum relay ESTABLISHED sockets`
-- `Maximum relay SYN-SENT sockets`
-- the derived end-to-end path result
+## Workers warning and next isolated hypothesis
 
-The AWG byte deltas from that run remain real, but they do not independently prove which Teleproxy sockets carried the traffic.
-
-## Corrected validation plan
-
-1. Keep the active NAT pair `10.76.106.92:185.237.186.95` unchanged.
-2. Do not restart Teleproxy.
-3. Do not change AWG, nginx, workers, or secrets.
-4. Observe one Telegram client attempt for 120 seconds.
-5. Sample `ss -H -tanp` without an explicit state filter so the state remains column 1.
-6. Count inbound TCP 443 and MiddleProxy TCP 8888 sockets from the correct columns.
-7. Sample four times per second to capture short-lived relay sockets.
-8. Record AWG transfer deltas and new Teleproxy journal lines.
-9. Redact the client IP and never print the secret.
-10. Keep Teleproxy autostart disabled until the client reports a stable connection.
-
-## Workers warning
-
-The current TOML still contains:
+The current TOML contains:
 
 `workers = 1`
 
-Teleproxy logs:
+At every startup Teleproxy logs:
 
 `It is recommended to not use workers with TLS-transport`
 
-This setting is not being changed together with the NAT correction. It will be evaluated only after the corrected live observation, so that one variable is changed at a time.
+The official Fake-TLS documentation shows a single-process example, while the general tuning documentation says one worker is the generic default. The explicit runtime warning is specific to TLS transport.
+
+The next isolated test should:
+
+1. Back up the current TOML configuration.
+2. Remove only `workers = 1`.
+3. Preserve the corrected NAT pair and every other setting.
+4. Restart only `teleproxy.service`.
+5. Confirm that the worker warning disappears and only one Teleproxy process handles TCP 443.
+6. Repeat one Telegram client test.
+7. Roll back automatically if server health checks fail.
+
+This remains a hypothesis until the client test succeeds.
 
 ## Safety constraints
 
@@ -123,5 +125,5 @@ This setting is not being changed together with the NAT correction. It will be e
 - Default route remains on `eth0`.
 - SSH remains outside the VPN.
 - nginx and AWG are not restarted.
-- Existing secret and connection link remain unchanged.
-- Teleproxy autostart remains disabled pending stable client confirmation.
+- Existing secret and Telegram connection link remain unchanged.
+- Teleproxy autostart remains disabled until the Telegram client reports a stable connection.
